@@ -329,7 +329,14 @@ class TestPipEnvironment(TestFileEnvironment):
         shutil.rmtree(self.root_path, ignore_errors=True)
 
     def _find_package_path(self, module):
-        return os.path.dirname(os.path.dirname(__import__(module).__file__))
+        __import__(module)
+        mod = sys.modules[module]
+        if not hasattr(mod, '__file__'):
+            raise AttributeError('Module %r has no __file__, cannot determine path' % mod)
+        location = os.path.dirname(os.path.abspath(mod.__file__))
+        if '.' in module:
+            location = os.path.dirname(location)
+        return os.path.dirname(location)
 
     def _use_cached_pypi_server(self):
         site_packages = self.root_path / self.site_packages
@@ -351,6 +358,10 @@ def download_and_extract_bz2_file_to_here(file_url):
 
 def run_pip(*args, **kw):
     return env.run('pip', *args, **kw)
+
+
+def get_env():
+    return env
 
 
 def write_file(filename, text, dest=None):
