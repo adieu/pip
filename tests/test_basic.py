@@ -303,6 +303,30 @@ def test_install_curdir():
     assert fspkg_folder in result.files_created, str(result.stdout)
     assert egg_info_folder in result.files_created, str(result)
 
+def test_install_curdir_usersite():
+    """
+    Test installing current directory ('.') into usersite
+    """
+    env = reset_env()
+    run_from = abspath(join(here, 'packages', 'FSPkg'))
+    result = run_pip('install', '--user', curdir, cwd=run_from, expect_error=False)
+    fspkg_folder = env.user_site/'fspkg'
+    egg_info_folder = env.user_site/'FSPkg-0.1dev-py%s.egg-info' % pyversion
+    assert fspkg_folder in result.files_created, str(result.stdout)
+    assert egg_info_folder in result.files_created, str(result)
+
+def test_install_curdir_usersite_editable():
+    """
+    Test installing current directory ('.') into usersite
+    """
+    env = reset_env()
+    (env.lib_path/'no-global-site-packages.txt').rm() # this one reenables user_site
+
+    run_pip('install', '-U', 'distribute') #XXX: only works with distribute
+    result = run_pip('install', '--user', '-e',
+                     '%s#egg=initools-dev' %
+                     local_checkout('svn+http://svn.colorstudy.com/INITools/trunk'))
+    result.assert_installed('INITools', use_user_site=True)
 
 def test_install_pardir():
     """
