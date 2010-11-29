@@ -7,7 +7,7 @@ import urllib
 
 from pip.exceptions import BadCommand
 from pip.log import logger
-from pip.util import display_path, backup_dir, find_command, ask
+from pip.util import display_path, backup_dir, find_command, ask, rmtree
 
 
 __all__ = ['vcs', 'get_src_requirement', 'import_vcs_support']
@@ -213,7 +213,7 @@ class VersionControl(object):
                 pass
             elif response == 'w':
                 logger.warn('Deleting %s' % display_path(dest))
-                shutil.rmtree(dest)
+                rmtree(dest)
                 checkout = True
             elif response == 'b':
                 dest_dir = backup_dir(dest)
@@ -224,7 +224,9 @@ class VersionControl(object):
         return checkout
 
     def unpack(self, location):
-        raise NotImplementedError
+        if os.path.exists(location):
+            rmtree(location)
+        self.obtain(location)
 
     def get_src_requirement(self, dist, location, find_tags=False):
         raise NotImplementedError

@@ -34,20 +34,6 @@ class Mercurial(VersionControl):
                 return url, rev
         return None, None
 
-    def unpack(self, location):
-        """Clone the Hg repository at the url to the destination location"""
-        url, rev = self.get_url_rev()
-        logger.notify('Cloning Mercurial repository %s to %s' % (url, location))
-        logger.indent += 2
-        try:
-            if os.path.exists(location):
-                os.rmdir(location)
-            call_subprocess(
-                [self.cmd, 'clone', url, location],
-                filter_stdout=self._filter, show_stdout=False)
-        finally:
-            logger.indent -= 2
-
     def export(self, location):
         """Export the Hg repository at the url to the destination location"""
         temp_dir = tempfile.mkdtemp('-export', 'pip-')
@@ -57,7 +43,7 @@ class Mercurial(VersionControl):
                 [self.cmd, 'archive', location],
                 filter_stdout=self._filter, show_stdout=False, cwd=temp_dir)
         finally:
-            shutil.rmtree(temp_dir)
+            rmtree(temp_dir)
 
     def switch(self, dest, url, rev_options):
         repo_config = os.path.join(dest, self.dirname, 'hgrc')
