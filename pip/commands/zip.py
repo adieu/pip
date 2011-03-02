@@ -4,10 +4,11 @@ import fnmatch
 import os
 import shutil
 import zipfile
-from pip.util import display_path, backup_dir
+from pip.util import display_path, backup_dir, rmtree
 from pip.log import logger
 from pip.exceptions import InstallationError
 from pip.basecommand import Command
+
 
 class ZipCommand(Command):
     name = 'zip'
@@ -134,12 +135,12 @@ class ZipCommand(Command):
             zip = zipfile.ZipFile(zip_filename)
             to_save = []
             for name in zip.namelist():
-                if name.startswith('%s/' % module_name):
+                if name.startswith(module_name + os.path.sep):
                     content = zip.read(name)
                     dest = os.path.join(package_path, name)
                     if not os.path.exists(os.path.dirname(dest)):
                         os.makedirs(os.path.dirname(dest))
-                    if not content and dest.endswith('/'):
+                    if not content and dest.endswith(os.path.sep):
                         if not os.path.exists(dest):
                             os.makedirs(dest)
                     else:
@@ -197,7 +198,7 @@ class ZipCommand(Command):
                     zip.close()
                 logger.info('Removing old directory %s' % display_path(filename))
                 if not self.simulate:
-                    shutil.rmtree(filename)
+                    rmtree(filename)
             except:
                 ## FIXME: need to do an undo here
                 raise
@@ -222,7 +223,7 @@ class ZipCommand(Command):
                         os.unlink(pth)
                 else:
                     if not self.simulate:
-                        f = open(pth, 'w')
+                        f = open(pth, 'wb')
                         f.writelines(new_lines)
                         f.close()
                 return
@@ -243,7 +244,7 @@ class ZipCommand(Command):
                 lines.append(filename+'\n')
             else:
                 lines = [filename + '\n']
-            f = open(dest, 'w')
+            f = open(dest, 'wb')
             f.writelines(lines)
             f.close()
 
@@ -263,7 +264,7 @@ class ZipCommand(Command):
             if not os.path.isdir(path) and zipfile.is_zipfile(path):
                 zip = zipfile.ZipFile(path, 'r')
                 try:
-                    zip.read('%s/__init__.py' % package)
+                    zip.read(os.path.join(package, '__init__.py'))
                 except KeyError:
                     pass
                 else:
@@ -286,7 +287,7 @@ class ZipCommand(Command):
                 if os.path.dirname(path) not in self.paths():
                     logger.notify('Zipped egg: %s' % display_path(path))
                 continue
-            if (basename != 'site-packages'
+            if (basename != 'site-packages' and basename != 'dist-packages'
                 and not path.replace('\\', '/').endswith('lib/python')):
                 continue
             logger.notify('In %s:' % display_path(path))
@@ -340,5 +341,6 @@ class ZipCommand(Command):
                          if not f.lower().endswith('.pyc')]
             total += len(filenames)
         return total
+
 
 ZipCommand()

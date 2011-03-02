@@ -11,6 +11,7 @@ _svn_rev_re = re.compile('committed-rev="(\d+)"')
 _svn_url_re = re.compile(r'URL: (.+)')
 _svn_revision_re = re.compile(r'Revision: (.+)')
 
+
 class Subversion(VersionControl):
     name = 'svn'
     dirname = '.svn'
@@ -24,7 +25,7 @@ class Subversion(VersionControl):
         """Returns (url, revision), where both are strings"""
         assert not location.rstrip('/').endswith(self.dirname), 'Bad directory: %s' % location
         output = call_subprocess(
-            ['svn', 'info', location], show_stdout=False, extra_environ={'LANG': 'C'})
+            [self.cmd, 'info', location], show_stdout=False, extra_environ={'LANG': 'C'})
         match = _svn_url_re.search(output)
         if not match:
             logger.warn('Cannot determine URL of svn checkout %s' % display_path(location))
@@ -50,26 +51,10 @@ class Subversion(VersionControl):
             return rest, rev
         return None, None
 
-    def unpack(self, location):
-        """Check out the svn repository at the url to the destination location"""
-        url, rev = self.get_url_rev()
-        logger.notify('Checking out svn repository %s to %s' % (url, location))
-        logger.indent += 2
-        try:
-            if os.path.exists(location):
-                # Subversion doesn't like to check out over an existing directory
-                # --force fixes this, but was only added in svn 1.5
-                rmtree(location)
-            call_subprocess(
-                ['svn', 'checkout', url, location],
-                filter_stdout=self._filter, show_stdout=False)
-        finally:
-            logger.indent -= 2
-
     def export(self, location):
         """Export the svn repository at the url to the destination location"""
         url, rev = self.get_url_rev()
-        logger.notify('Checking out svn repository %s to %s' % (url, location))
+        logger.notify('Exporting svn repository %s to %s' % (url, location))
         logger.indent += 2
         try:
             if os.path.exists(location):
@@ -77,18 +62,18 @@ class Subversion(VersionControl):
                 # --force fixes this, but was only added in svn 1.5
                 rmtree(location)
             call_subprocess(
-                ['svn', 'export', url, location],
+                [self.cmd, 'export', url, location],
                 filter_stdout=self._filter, show_stdout=False)
         finally:
             logger.indent -= 2
 
     def switch(self, dest, url, rev_options):
         call_subprocess(
-            ['svn', 'switch'] + rev_options + [url, dest])
+            [self.cmd, 'switch'] + rev_options + [url, dest])
 
     def update(self, dest, rev_options):
         call_subprocess(
-            ['svn', 'update'] + rev_options + [dest])
+            [self.cmd, 'update'] + rev_options + [dest])
 
     def obtain(self, dest):
         url, rev = self.get_url_rev()
@@ -102,10 +87,9 @@ class Subversion(VersionControl):
             logger.notify('Checking out %s%s to %s'
                           % (url, rev_display, display_path(dest)))
             call_subprocess(
-                ['svn', 'checkout', '-q'] + rev_options + [url, dest])
+                [self.cmd, 'checkout', '-q'] + rev_options + [url, dest])
 
     def get_location(self, dist, dependency_links):
-        egg_fragment_re = re.compile(r'#egg=(.*)$')
         for url in dependency_links:
             egg_fragment = Link(url).egg_fragment
             if not egg_fragment:
@@ -140,7 +124,7 @@ class Subversion(VersionControl):
             f.close()
 
             if data.startswith('8') or data.startswith('9') or data.startswith('10'):
-                data = map(str.splitlines,data.split('\n\x0c\n'))
+                data = map(str.splitlines, data.split('\n\x0c\n'))
                 del data[0][0]  # get rid of the '8'
                 dirurl = data[0][3]
                 revs = [int(d[9]) for d in data if len(d)>9 and d[9]]+[0]
@@ -190,7 +174,7 @@ class Subversion(VersionControl):
         data = f.read()
         f.close()
         if data.startswith('8') or data.startswith('9') or data.startswith('10'):
-            data = map(str.splitlines,data.split('\n\x0c\n'))
+            data = map(str.splitlines, data.split('\n\x0c\n'))
             del data[0][0]  # get rid of the '8'
             return data[0][3]
         elif data.startswith('<?xml'):
@@ -205,7 +189,7 @@ class Subversion(VersionControl):
 
     def get_tag_revs(self, svn_tag_url):
         stdout = call_subprocess(
-            ['svn', 'ls', '-v', svn_tag_url], show_stdout=False)
+            [self.cmd, 'ls', '-v', svn_tag_url], show_stdout=False)
         results = []
         for line in stdout.splitlines():
             parts = line.split()

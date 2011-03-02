@@ -1,20 +1,35 @@
-import os
-import shutil
 import tempfile
 import re
 from pip import call_subprocess
-from pip.util import display_path
+from pip.util import display_path, rmtree
 from pip.vcs import vcs, VersionControl
 from pip.log import logger
+from urllib import url2pathname
+from urlparse import urlsplit, urlunsplit
 
 class Git(VersionControl):
     name = 'git'
     dirname = '.git'
     repo_name = 'clone'
-    schemes = ('git', 'git+http', 'git+ssh', 'git+git')
+    schemes = ('git', 'git+http', 'git+https', 'git+ssh', 'git+git', 'git+file')
     bundle_file = 'git-clone.txt'
     guide = ('# This was a Git repo; to make it a repo again run:\n'
         'git init\ngit remote add origin %(url)s -f\ngit checkout %(rev)s\n')
+
+    def __init__(self, url=None, *args, **kwargs):
+
+        # Works around an apparent Git bug
+        # (see http://article.gmane.org/gmane.comp.version-control.git/146500)
+        if url:
+            scheme, netloc, path, query, fragment = urlsplit(url)
+            if scheme.endswith('file'):
+                initial_slashes = path[:-len(path.lstrip('/'))]
+                newpath = initial_slashes + url2pathname(path).replace('\\', '/').lstrip('/')
+                url = urlunsplit((scheme, netloc, newpath, query, fragment))
+                after_plus = scheme.find('+')+1
+                url = scheme[:after_plus]+ urlunsplit((scheme[after_plus:], netloc, newpath, query, fragment))
+
+        super(Git, self).__init__(url, *args, **kwargs)
 
     def parse_vcs_bundle_file(self, content):
         url = rev = None
@@ -31,20 +46,6 @@ class Git(VersionControl):
                 return url, rev
         return None, None
 
-    def unpack(self, location):
-        """Clone the Git repository at the url to the destination location"""
-        url, rev = self.get_url_rev()
-        logger.notify('Cloning Git repository %s to %s' % (url, location))
-        logger.indent += 2
-        try:
-            if os.path.exists(location):
-                os.rmdir(location)
-            call_subprocess(
-                [self.cmd, 'clone', url, location],
-                filter_stdout=self._filter, show_stdout=False)
-        finally:
-            logger.indent -= 2
-
     def export(self, location):
         """Export the Git repository at the url to the destination location"""
         temp_dir = tempfile.mkdtemp('-export', 'pip-')
@@ -56,27 +57,27 @@ class Git(VersionControl):
                 [self.cmd, 'checkout-index', '-a', '-f', '--prefix', location],
                 filter_stdout=self._filter, show_stdout=False, cwd=temp_dir)
         finally:
-            shutil.rmtree(temp_dir)
+            rmtree(temp_dir)
 
     def check_rev_options(self, rev, dest, rev_options):
         """Check the revision options before checkout to compensate that tags
-        and branches may need origin/ as a prefix"""
-        if rev is None:
-            # bail and use preset
-            return rev_options
+        and branches may need origin/ as a prefix.
+        Returns the SHA1 of the branch or tag if found.
+        """
         revisions = self.get_tag_revs(dest)
         revisions.update(self.get_branch_revs(dest))
-        if rev in revisions:
-            # if rev is a sha
-            return [rev]
-        inverse_revisions = dict((v,k) for k, v in revisions.iteritems())
-        if rev not in inverse_revisions: # is rev a name or tag?
-            origin_rev = 'origin/%s' % rev
-            if origin_rev in inverse_revisions:
-                rev = inverse_revisions[origin_rev]
-            else:
-                logger.warn("Could not find a tag or branch '%s', assuming commit." % rev)
-        return [rev]
+        inverse_revisions = dict((v, k) for k, v in revisions.iteritems())
+        # Check if rev is a branch name
+        origin_rev = 'origin/%s' % rev
+        if origin_rev in inverse_revisions:
+            # a remote tag or branch name
+            return [inverse_revisions[origin_rev]]
+        elif rev in inverse_revisions:
+            # a local tag or branch name
+            return [inverse_revisions[rev]]
+        else:
+            logger.warn("Could not find a tag or branch '%s', assuming commit." % rev)
+            return rev_options
 
     def switch(self, dest, url, rev_options):
         call_subprocess(
@@ -85,9 +86,12 @@ class Git(VersionControl):
             [self.cmd, 'checkout', '-q'] + rev_options, cwd=dest)
 
     def update(self, dest, rev_options):
+        # First fetch changes from the default remote
         call_subprocess([self.cmd, 'fetch', '-q'], cwd=dest)
-        call_subprocess(
-            [self.cmd, 'checkout', '-q', '-f'] + rev_options, cwd=dest)
+        # Then reset to wanted revision (maby even origin/master)
+        if rev_options:
+            rev_options = self.check_rev_options(rev_options[0], dest, rev_options)
+        call_subprocess([self.cmd, 'reset', '--hard', '-q'] + rev_options, cwd=dest)
 
     def obtain(self, dest):
         url, rev = self.get_url_rev()
@@ -95,17 +99,16 @@ class Git(VersionControl):
             rev_options = [rev]
             rev_display = ' (to %s)' % rev
         else:
-            rev_options = ['master']
+            rev_options = ['origin/master']
             rev_display = ''
         if self.check_destination(dest, url, rev_options, rev_display):
             logger.notify('Cloning %s%s to %s' % (url, rev_display, display_path(dest)))
             call_subprocess([self.cmd, 'clone', '-q', url, dest])
-            checked_rev = self.check_rev_options(rev, dest, rev_options)
-            # only explicitely checkout the "revision" in case the check
-            # found a valid tag, commit or branch
-            if rev_options != checked_rev:
-                call_subprocess(
-                    [self.cmd, 'checkout', '-q'] + checked_rev, cwd=dest)
+            if rev:
+                rev_options = self.check_rev_options(rev, dest, rev_options)
+                # Only do a checkout if rev_options differs from HEAD
+                if not self.get_revision(dest).startswith(rev_options[0]):
+                    call_subprocess([self.cmd, 'checkout', '-q'] + rev_options, cwd=dest)
 
     def get_url(self, location):
         url = call_subprocess(
@@ -161,10 +164,10 @@ class Git(VersionControl):
         elif (current_rev in branch_revs and
               branch_revs[current_rev] != 'origin/master'):
             # It's the head of a branch
-            full_egg_name = '%s-%s' % (dist.egg_name(),
+            full_egg_name = '%s-%s' % (egg_project_name,
                                        branch_revs[current_rev].replace('origin/', ''))
         else:
-            full_egg_name = '%s-dev' % dist.egg_name()
+            full_egg_name = '%s-dev' % egg_project_name
 
         return '%s@%s#egg=%s' % (repo, current_rev, full_egg_name)
 
@@ -176,10 +179,14 @@ class Git(VersionControl):
         parsing. Hence we remove it again afterwards and return it as a stub.
         """
         if not '://' in self.url:
+            assert not 'file:' in self.url
             self.url = self.url.replace('git+', 'git+ssh://')
             url, rev = super(Git, self).get_url_rev()
             url = url.replace('ssh://', '')
-            return url, rev
-        return super(Git, self).get_url_rev()
+        else:
+            url, rev = super(Git, self).get_url_rev()
+
+        return url, rev
+
 
 vcs.register(Git)

@@ -1,12 +1,12 @@
 import os
-import shutil
 import tempfile
 import re
 import ConfigParser
 from pip import call_subprocess
-from pip.util import display_path, filename_to_url
+from pip.util import display_path, rmtree
 from pip.log import logger
 from pip.vcs import vcs, VersionControl
+from pip.download import path_to_url2
 
 
 class Mercurial(VersionControl):
@@ -33,30 +33,16 @@ class Mercurial(VersionControl):
                 return url, rev
         return None, None
 
-    def unpack(self, location):
-        """Clone the Hg repository at the url to the destination location"""
-        url, rev = self.get_url_rev()
-        logger.notify('Cloning Mercurial repository %s to %s' % (url, location))
-        logger.indent += 2
-        try:
-            if os.path.exists(location):
-                os.rmdir(location)
-            call_subprocess(
-                ['hg', 'clone', url, location],
-                filter_stdout=self._filter, show_stdout=False)
-        finally:
-            logger.indent -= 2
-
     def export(self, location):
         """Export the Hg repository at the url to the destination location"""
         temp_dir = tempfile.mkdtemp('-export', 'pip-')
         self.unpack(temp_dir)
         try:
             call_subprocess(
-                ['hg', 'archive', location],
+                [self.cmd, 'archive', location],
                 filter_stdout=self._filter, show_stdout=False, cwd=temp_dir)
         finally:
-            shutil.rmtree(temp_dir)
+            rmtree(temp_dir)
 
     def switch(self, dest, url, rev_options):
         repo_config = os.path.join(dest, self.dirname, 'hgrc')
@@ -72,12 +58,12 @@ class Mercurial(VersionControl):
                 'Could not switch Mercurial repository to %s: %s'
                 % (url, e))
         else:
-            call_subprocess(['hg', 'update', '-q'] + rev_options, cwd=dest)
+            call_subprocess([self.cmd, 'update', '-q'] + rev_options, cwd=dest)
 
     def update(self, dest, rev_options):
-        call_subprocess(['hg', 'pull', '-q'], cwd=dest)
+        call_subprocess([self.cmd, 'pull', '-q'], cwd=dest)
         call_subprocess(
-            ['hg', 'update', '-q'] + rev_options, cwd=dest)
+            [self.cmd, 'update', '-q'] + rev_options, cwd=dest)
 
     def obtain(self, dest):
         url, rev = self.get_url_rev()
@@ -90,50 +76,52 @@ class Mercurial(VersionControl):
         if self.check_destination(dest, url, rev_options, rev_display):
             logger.notify('Cloning hg %s%s to %s'
                           % (url, rev_display, display_path(dest)))
-            call_subprocess(['hg', 'clone', '--noupdate', '-q', url, dest])
-            call_subprocess(['hg', 'update', '-q'] + rev_options, cwd=dest)
+            call_subprocess([self.cmd, 'clone', '--noupdate', '-q', url, dest])
+            call_subprocess([self.cmd, 'update', '-q'] + rev_options, cwd=dest)
 
     def get_url(self, location):
         url = call_subprocess(
-            ['hg', 'showconfig', 'paths.default'],
+            [self.cmd, 'showconfig', 'paths.default'],
             show_stdout=False, cwd=location).strip()
-        if url.startswith('/') or url.startswith('\\'):
-            url = filename_to_url(url)
+        if self._is_local_repository(url):
+            url = path_to_url2(url)
         return url.strip()
 
     def get_tag_revs(self, location):
         tags = call_subprocess(
-            ['hg', 'tags'], show_stdout=False, cwd=location)
+            [self.cmd, 'tags'], show_stdout=False, cwd=location)
         tag_revs = []
         for line in tags.splitlines():
             tags_match = re.search(r'([\w\d\.-]+)\s*([\d]+):.*$', line)
             if tags_match:
                 tag = tags_match.group(1)
                 rev = tags_match.group(2)
-                tag_revs.append((rev.strip(), tag.strip()))
+                if "tip" != tag:
+                    tag_revs.append((rev.strip(), tag.strip()))
         return dict(tag_revs)
 
     def get_branch_revs(self, location):
         branches = call_subprocess(
-            ['hg', 'branches'], show_stdout=False, cwd=location)
+            [self.cmd, 'branches'], show_stdout=False, cwd=location)
         branch_revs = []
         for line in branches.splitlines():
             branches_match = re.search(r'([\w\d\.-]+)\s*([\d]+):.*$', line)
             if branches_match:
                 branch = branches_match.group(1)
                 rev = branches_match.group(2)
-                branch_revs.append((rev.strip(), branch.strip()))
+                if "default" != branch:
+                    branch_revs.append((rev.strip(), branch.strip()))
         return dict(branch_revs)
 
     def get_revision(self, location):
         current_revision = call_subprocess(
-            ['hg', 'parents', '--template={rev}'],
+            [self.cmd, 'parents', '--template={rev}'],
             show_stdout=False, cwd=location).strip()
         return current_revision
 
     def get_revision_hash(self, location):
         current_rev_hash = call_subprocess(
-            ['hg', 'parents', '--template={node}'],
+            [self.cmd, 'parents', '--template={node}'],
             show_stdout=False, cwd=location).strip()
         return current_rev_hash
 
@@ -153,9 +141,9 @@ class Mercurial(VersionControl):
             full_egg_name = '%s-%s' % (egg_project_name, tag_revs[current_rev])
         elif current_rev in branch_revs:
             # It's the tip of a branch
-            full_egg_name = '%s-%s' % (dist.egg_name(), branch_revs[current_rev])
+            full_egg_name = '%s-%s' % (egg_project_name, branch_revs[current_rev])
         else:
-            full_egg_name = '%s-dev' % dist.egg_name()
+            full_egg_name = '%s-dev' % egg_project_name
         return '%s@%s#egg=%s' % (repo, current_rev_hash, full_egg_name)
 
 vcs.register(Mercurial)

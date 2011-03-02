@@ -3,22 +3,30 @@
 import sys
 import os
 import re
+import mimetypes
 import threading
 import posixpath
 import pkg_resources
-import operator
+import urllib
 import urllib2
 import urlparse
-import httplib
+import random
 import socket
+import string
 from Queue import Queue
 from Queue import Empty as QueueEmpty
 from pip.log import logger
-from pip.util import Inf, filename_to_url2, url_to_filename
+from pip.util import Inf
 from pip.util import normalize_name, splitext
 from pip.exceptions import DistributionNotFound
+from pip.backwardcompat import WindowsError, product
+from pip.download import urlopen, path_to_url2, url_to_path, geturl, Urllib2HeadRequest
 
 __all__ = ['PackageFinder']
+
+
+DEFAULT_MIRROR_URL = "last.pypi.python.org"
+
 
 class PackageFinder(object):
     """This finds packages.
@@ -27,15 +35,19 @@ class PackageFinder(object):
     packages, by reading pages and looking for appropriate links
     """
 
-    failure_limit = 3
-
-    def __init__(self, find_links, index_urls):
+    def __init__(self, find_links, index_urls,
+            use_mirrors=False, mirrors=None, main_mirror_url=None):
         self.find_links = find_links
         self.index_urls = index_urls
         self.dependency_links = []
         self.cache = PageCache()
         # These are boring links that have already been logged somehow:
         self.logged_links = set()
+        if use_mirrors:
+            self.mirror_urls = self._get_mirror_urls(mirrors, main_mirror_url)
+            logger.info('Using PyPI mirrors: %s' % ', '.join(self.mirror_urls))
+        else:
+            self.mirror_urls = []
 
     def add_dependency_links(self, links):
         ## FIXME: this shouldn't be global list this, it should only
@@ -43,6 +55,37 @@ class PackageFinder(object):
         ## dependency_links value
         ## FIXME: also, we should track comes_from (i.e., use Link)
         self.dependency_links.extend(links)
+
+    @staticmethod
+    def _sort_locations(locations):
+        """
+        Sort locations into "files" (archives) and "urls", and return
+        a pair of lists (files,urls)
+        """
+        files = []
+        urls = []
+
+        # puts the url for the given file path into the appropriate
+        # list
+        def sort_path(path):
+            url = path_to_url2(path)
+            if mimetypes.guess_type(url, strict=False)[0] == 'text/html':
+                urls.append(url)
+            else:
+                files.append(url)
+
+        for url in locations:
+            if url.startswith('file:'):
+                path = url_to_path(url)
+                if os.path.isdir(path):
+                    path = os.path.realpath(path)
+                    for item in os.listdir(path):
+                        sort_path(os.path.join(path, item))
+                elif os.path.isfile(path):
+                    sort_path(path)
+            else:
+                urls.append(url)
+        return files, urls
 
     def find_requirement(self, req, upgrade):
         url_name = req.url_name
@@ -55,8 +98,13 @@ class PackageFinder(object):
             page = self._get_page(main_index_url, req)
             if page is None:
                 url_name = self._find_url_name(Link(self.index_urls[0]), url_name, req) or req.url_name
+
+        # Combine index URLs with mirror URLs here to allow
+        # adding more index URLs from requirements files
+        all_index_urls = self.index_urls + self.mirror_urls
+
         def mkurl_pypi_url(url):
-            loc =  posixpath.join(url, url_name)
+            loc = posixpath.join(url, url_name)
             # For maximum compatibility with easy_install, ensure the path
             # ends in a trailing slash.  Although this isn't in the spec
             # (and PyPI can handle it without the slash) some other index
@@ -67,7 +115,7 @@ class PackageFinder(object):
         if url_name is not None:
             locations = [
                 mkurl_pypi_url(url)
-                for url in self.index_urls] + self.find_links
+                for url in all_index_urls] + self.find_links
         else:
             locations = list(self.find_links)
         locations.extend(self.dependency_links)
@@ -75,20 +123,8 @@ class PackageFinder(object):
             if url_name is not None and main_index_url is not None:
                 locations = [
                     posixpath.join(main_index_url.url, version)] + locations
-        file_locations = []
-        url_locations = []
-        for url in locations:
-            if url.startswith('file:'):
-                fn = url_to_filename(url)
-                if os.path.isdir(fn):
-                    path = os.path.realpath(fn)
-                    for item in os.listdir(path):
-                        file_locations.append(
-                            filename_to_url2(os.path.join(path, item)))
-                elif os.path.isfile(fn):
-                    file_locations.append(filename_to_url2(fn))
-            else:
-                url_locations.append(url)
+
+        file_locations, url_locations = self._sort_locations(locations)
 
         locations = [Link(url) for url in url_locations]
         logger.debug('URLs to search for versions for %s:' % req)
@@ -119,7 +155,7 @@ class PackageFinder(object):
             found_versions.append((req.satisfied_by.parsed_version, Inf, req.satisfied_by.version))
         if file_versions:
             file_versions.sort(reverse=True)
-            logger.info('Local files found: %s' % ', '.join([url_to_filename(link.url) for parsed, link, version in file_versions]))
+            logger.info('Local files found: %s' % ', '.join([url_to_path(link.url) for parsed, link, version in file_versions]))
             found_versions = file_versions + found_versions
         all_versions = found_versions + page_versions + dependency_versions
         applicable_versions = []
@@ -213,55 +249,64 @@ class PackageFinder(object):
     _py_version_re = re.compile(r'-py([123]\.[0-9])$')
 
     def _sort_links(self, links):
-        "Brings links in order, non-egg links first, egg links second"
+        "Returns elements of links in order, non-egg links first, egg links second, while eliminating duplicates"
         eggs, no_eggs = [], []
+        seen = set()
         for link in links:
-            if link.egg_fragment:
-                eggs.append(link)
-            else:
-                no_eggs.append(link)
+            if link not in seen:
+                seen.add(link)
+                if link.egg_fragment:
+                    eggs.append(link)
+                else:
+                    no_eggs.append(link)
         return no_eggs + eggs
 
     def _package_versions(self, links, search_name):
-        seen_links = {}
         for link in self._sort_links(links):
-            if link.url in seen_links:
-                continue
-            seen_links[link.url] = None
-            if link.egg_fragment:
-                egg_info = link.egg_fragment
-            else:
-                path = link.path
-                egg_info, ext = link.splitext()
-                if not ext:
-                    if link not in self.logged_links:
-                        logger.debug('Skipping link %s; not a file' % link)
-                        self.logged_links.add(link)
-                    continue
-                if egg_info.endswith('.tar'):
-                    # Special double-extension case:
-                    egg_info = egg_info[:-4]
-                    ext = '.tar' + ext
-                if ext not in ('.tar.gz', '.tar.bz2', '.tar', '.tgz', '.zip'):
-                    if link not in self.logged_links:
-                        logger.debug('Skipping link %s; unknown archive format: %s' % (link, ext))
-                        self.logged_links.add(link)
-                    continue
-            version = self._egg_info_matches(egg_info, search_name, link)
-            if version is None:
-                logger.debug('Skipping link %s; wrong project name (not %s)' % (link, search_name))
-                continue
-            match = self._py_version_re.search(version)
-            if match:
-                version = version[:match.start()]
-                py_version = match.group(1)
-                if py_version != sys.version[:3]:
-                    logger.debug('Skipping %s because Python version is incorrect' % link)
-                    continue
-            logger.debug('Found link %s, version: %s' % (link, version))
-            yield (pkg_resources.parse_version(version),
-                   link,
-                   version)
+            for v in self._link_package_versions(link, search_name):
+                yield v
+
+    def _link_package_versions(self, link, search_name):
+        """
+        Return an iterable of triples (pkg_resources_version_key,
+        link, python_version) that can be extracted from the given
+        link.
+
+        Meant to be overridden by subclasses, not called by clients.
+        """
+        if link.egg_fragment:
+            egg_info = link.egg_fragment
+        else:
+            egg_info, ext = link.splitext()
+            if not ext:
+                if link not in self.logged_links:
+                    logger.debug('Skipping link %s; not a file' % link)
+                    self.logged_links.add(link)
+                return []
+            if egg_info.endswith('.tar'):
+                # Special double-extension case:
+                egg_info = egg_info[:-4]
+                ext = '.tar' + ext
+            if ext not in ('.tar.gz', '.tar.bz2', '.tar', '.tgz', '.zip'):
+                if link not in self.logged_links:
+                    logger.debug('Skipping link %s; unknown archive format: %s' % (link, ext))
+                    self.logged_links.add(link)
+                return []
+        version = self._egg_info_matches(egg_info, search_name, link)
+        if version is None:
+            logger.debug('Skipping link %s; wrong project name (not %s)' % (link, search_name))
+            return []
+        match = self._py_version_re.search(version)
+        if match:
+            version = version[:match.start()]
+            py_version = match.group(1)
+            if py_version != sys.version[:3]:
+                logger.debug('Skipping %s because Python version is incorrect' % link)
+                return []
+        logger.debug('Found link %s, version: %s' % (link, version))
+        return [(pkg_resources.parse_version(version),
+               link,
+               version)]
 
     def _egg_info_matches(self, egg_info, search_name, link):
         match = self._egg_info_re.search(egg_info)
@@ -278,6 +323,26 @@ class PackageFinder(object):
 
     def _get_page(self, link, req):
         return HTMLPage.get_page(link, req, cache=self.cache)
+
+    def _get_mirror_urls(self, mirrors=None, main_mirror_url=None):
+        """Retrieves a list of URLs from the main mirror DNS entry
+        unless a list of mirror URLs are passed.
+        """
+        if not mirrors:
+            mirrors = get_mirrors(main_mirror_url)
+            # Should this be made "less random"? E.g. netselect like?
+            random.shuffle(mirrors)
+
+        mirror_urls = set()
+        for mirror_url in mirrors:
+            # Make sure we have a valid URL
+            if not ("http://" or "https://" or "file://") in mirror_url:
+                mirror_url = "http://%s" % mirror_url
+            if not mirror_url.endswith("/simple"):
+                mirror_url = "%s/simple/" % mirror_url
+            mirror_urls.add(mirror_url)
+
+        return list(mirror_urls)
 
 
 class PageCache(object):
@@ -309,6 +374,7 @@ class PageCache(object):
         for url in urls:
             self._pages[url] = page
 
+
 class HTMLPage(object):
     """Represents one page, along with its URL"""
 
@@ -334,9 +400,14 @@ class HTMLPage(object):
         url = url.split('#', 1)[0]
         if cache.too_many_failures(url):
             return None
-        if url.lower().startswith('svn'):
-            logger.debug('Cannot look at svn URL %s' % link)
-            return None
+
+        # Check for VCS schemes that do not support lookup as web pages.
+        from pip.vcs import VcsSupport
+        for scheme in VcsSupport.schemes:
+            if url.lower().startswith(scheme) and url[len(scheme)] in '+:':
+                logger.debug('Cannot look at %(scheme)s URL %(link)s' % locals())
+                return None
+
         if cache is not None:
             inst = cache.get_page(url)
             if inst is not None:
@@ -358,11 +429,22 @@ class HTMLPage(object):
                                 cache.set_is_archive(url)
                             return None
             logger.debug('Getting page %s' % url)
-            resp = urllib2.urlopen(url)
-            real_url = resp.geturl()
+
+            # Tack index.html onto file:// URLs that point to directories
+            (scheme, netloc, path, params, query, fragment) = urlparse.urlparse(url)
+            if scheme == 'file' and os.path.isdir(urllib.url2pathname(path)):
+                # add trailing slash if not present so urljoin doesn't trim final segment
+                if not url.endswith('/'):
+                    url += '/'
+                url = urlparse.urljoin(url, 'index.html')
+                logger.debug(' file: URL is directory, getting %s' % url)
+
+            resp = urlopen(url)
+
+            real_url = geturl(resp)
             headers = resp.info()
             inst = cls(resp.read(), real_url, headers)
-        except (urllib2.HTTPError, urllib2.URLError, socket.timeout, socket.error), e:
+        except (urllib2.HTTPError, urllib2.URLError, socket.timeout, socket.error, OSError, WindowsError), e:
             desc = str(e)
             if isinstance(e, socket.timeout):
                 log_meth = logger.info
@@ -395,26 +477,19 @@ class HTMLPage(object):
     def _get_content_type(url):
         """Get the Content-Type of the given url, using a HEAD request"""
         scheme, netloc, path, query, fragment = urlparse.urlsplit(url)
-        if scheme == 'http':
-            ConnClass = httplib.HTTPConnection
-        elif scheme == 'https':
-            ConnClass = httplib.HTTPSConnection
-        else:
+        if not scheme in ('http', 'https', 'ftp', 'ftps'):
             ## FIXME: some warning or something?
             ## assertion error?
             return ''
-        if query:
-            path += '?' + query
-        conn = ConnClass(netloc)
+        req = Urllib2HeadRequest(url, headers={'Host': netloc})
+        resp = urlopen(req)
         try:
-            conn.request('HEAD', path, headers={'Host': netloc})
-            resp = conn.getresponse()
-            if resp.status != 200:
+            if hasattr(resp, 'code') and resp.code != 200 and scheme not in ('ftp', 'ftps'):
                 ## FIXME: doesn't handle redirects
                 return ''
-            return resp.getheader('Content-Type') or ''
+            return resp.info().get('content-type', '')
         finally:
-            conn.close()
+            resp.close()
 
     @property
     def base_url(self):
@@ -478,6 +553,7 @@ class HTMLPage(object):
         % or other characters)."""
         return self._clean_re.sub(
             lambda match: '%%%2x' % ord(match.group(0)), url)
+
 
 class Link(object):
 
@@ -544,6 +620,7 @@ class Link(object):
     def show_url(self):
         return posixpath.basename(self.url.split('#', 1)[0].split('?', 1)[0])
 
+
 def get_requirement_from_url(url):
     """Get a requirement from the URL, if possible.  This looks for #egg
     in the URL"""
@@ -553,9 +630,10 @@ def get_requirement_from_url(url):
         egg_info = splitext(link.filename)[0]
     return package_to_requirement(egg_info)
 
+
 def package_to_requirement(package_name):
     """Translate a name like Foo-1.2 to Foo==1.3"""
-    match = re.search(r'^(.*?)(-dev|-\d.*)', package_name)
+    match = re.search(r'^(.*?)-(dev|\d.*)', package_name)
     if match:
         name = match.group(1)
         version = match.group(2)
@@ -566,3 +644,42 @@ def package_to_requirement(package_name):
         return '%s==%s' % (name, version)
     else:
         return name
+
+
+def get_mirrors(hostname=None):
+    """Return the list of mirrors from the last record found on the DNS
+    entry::
+
+    >>> from pip.index import get_mirrors
+    >>> get_mirrors()
+    ['a.pypi.python.org', 'b.pypi.python.org', 'c.pypi.python.org',
+    'd.pypi.python.org']
+
+    Originally written for the distutils2 project by Alexis Metaireau.
+    """
+    if hostname is None:
+        hostname = DEFAULT_MIRROR_URL
+
+    # return the last mirror registered on PyPI.
+    try:
+        hostname = socket.gethostbyname_ex(hostname)[0]
+    except socket.gaierror:
+        return []
+    end_letter = hostname.split(".", 1)
+
+    # determine the list from the last one.
+    return ["%s.%s" % (s, end_letter[1]) for s in string_range(end_letter[0])]
+
+
+def string_range(last):
+    """Compute the range of string between "a" and last.
+
+    This works for simple "a to z" lists, but also for "a to zz" lists.
+    """
+    for k in range(len(last)):
+        for x in product(string.ascii_lowercase, repeat=k+1):
+            result = ''.join(x)
+            yield result
+            if result == last:
+                return
+

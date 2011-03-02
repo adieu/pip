@@ -2,10 +2,12 @@ import sys
 import xmlrpclib
 import textwrap
 import pkg_resources
+import pip.download
 from pip.basecommand import Command
 from pip.util import get_terminal_size
 from pip.log import logger
 from distutils.version import StrictVersion, LooseVersion
+
 
 class SearchCommand(Command):
     name = 'search'
@@ -33,16 +35,15 @@ class SearchCommand(Command):
 
         terminal_width = None
         if sys.stdout.isatty():
-            terminal_size = get_terminal_size()
-            if terminal_size is not None:
-                terminal_width = terminal_size[0]
+            terminal_width = get_terminal_size()[0]
 
         print_results(hits, terminal_width=terminal_width)
 
     def search(self, query, index_url):
-        pypi = xmlrpclib.ServerProxy(index_url)
+        pypi = xmlrpclib.ServerProxy(index_url, pip.download.xmlrpclib_transport)
         hits = pypi.search({'name': query, 'summary': query}, 'or')
         return hits
+
 
 def transform_hits(hits):
     """
@@ -71,6 +72,7 @@ def transform_hits(hits):
     package_list = sorted(packages.values(), lambda x, y: cmp(y['score'], x['score']))
     return package_list
 
+
 def print_results(hits, name_column_width=25, terminal_width=None):
     installed_packages = [p.project_name for p in pkg_resources.working_set]
     for hit in hits:
@@ -98,6 +100,7 @@ def print_results(hits, name_column_width=25, terminal_width=None):
         except UnicodeEncodeError:
             pass
 
+
 def compare_versions(version1, version2):
     try:
         return cmp(StrictVersion(version1), StrictVersion(version2))
@@ -105,7 +108,9 @@ def compare_versions(version1, version2):
     except ValueError:
         return cmp(LooseVersion(version1), LooseVersion(version2))
 
+
 def highest_version(versions):
     return reduce((lambda v1, v2: compare_versions(v1, v2) == 1 and v1 or v2), versions)
+
 
 SearchCommand()

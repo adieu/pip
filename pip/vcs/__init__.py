@@ -4,11 +4,14 @@ import os
 import shutil
 import urlparse
 import urllib
-from pip.util import display_path, backup_dir, find_command, ask
+
 from pip.exceptions import BadCommand
 from pip.log import logger
+from pip.util import display_path, backup_dir, find_command, ask, rmtree
 
-__all__ = ['vcs', 'get_source_requirement', 'import_vcs_support']
+
+__all__ = ['vcs', 'get_src_requirement', 'import_vcs_support']
+
 
 class VcsSupport(object):
     _registry = {}
@@ -75,8 +78,8 @@ class VcsSupport(object):
             return self.get_backend(vc_type)
         return None
 
-vcs = VcsSupport()
 
+vcs = VcsSupport()
 
 
 class VersionControl(object):
@@ -91,14 +94,22 @@ class VersionControl(object):
     def _filter(self, line):
         return (logger.INFO, line)
 
+    def _is_local_repository(self, repo):
+        """
+           posix absolute paths start with os.path.sep,
+           win32 ones ones start with drive (like c:\\folder)
+        """
+        drive, tail = os.path.splitdrive(repo)
+        return repo.startswith(os.path.sep) or drive
+
     @property
     def cmd(self):
         if self._cmd is not None:
             return self._cmd
         command = find_command(self.name)
         if command is None:
-            raise BadCommand('Cannot find command %s' % self.name)
-        logger.info('Found command %s at %s' % (self.name, command))
+            raise BadCommand('Cannot find command %r' % self.name)
+        logger.info('Found command %r at %r' % (self.name, command))
         self._cmd = command
         return command
 
@@ -202,7 +213,7 @@ class VersionControl(object):
                 pass
             elif response == 'w':
                 logger.warn('Deleting %s' % display_path(dest))
-                shutil.rmtree(dest)
+                rmtree(dest)
                 checkout = True
             elif response == 'b':
                 dest_dir = backup_dir(dest)
@@ -213,10 +224,13 @@ class VersionControl(object):
         return checkout
 
     def unpack(self, location):
-        raise NotImplementedError
+        if os.path.exists(location):
+            rmtree(location)
+        self.obtain(location)
 
     def get_src_requirement(self, dist, location, find_tags=False):
         raise NotImplementedError
+
 
 def get_src_requirement(dist, location, find_tags):
     version_control = vcs.get_backend_from_location(location)
@@ -224,11 +238,3 @@ def get_src_requirement(dist, location, find_tags):
         return version_control().get_src_requirement(dist, location, find_tags)
     logger.warn('cannot determine version of editable source in %s (is not SVN checkout, Git clone, Mercurial clone or Bazaar branch)' % location)
     return dist.as_requirement()
-
-def import_vcs_support():
-    # Import all the version control support modules:
-    here = os.path.dirname(__file__)
-    for name in os.listdir(here):
-        if name != '__init__.py' and name.endswith('.py'):
-            name = os.path.splitext(name)[0]
-            __import__('pip.vcs.%s' % name)

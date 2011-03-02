@@ -1,31 +1,33 @@
 import sys
 import shutil
 import os
-import posixpath
 import stat
-import urllib
-import urllib2
 import re
-
+import posixpath
 import pkg_resources
-
-from pip.backwardcompat import WindowsError
+import zipfile
+import tarfile
 from pip.exceptions import InstallationError
-from pip.locations import site_packages
+from pip.backwardcompat import WindowsError
+from pip.locations import site_packages, running_under_virtualenv
+from pip.log import logger
 
 __all__ = ['rmtree', 'display_path', 'backup_dir',
-           'find_command', 'splitext', 'ask', 'Inf',
-           'url_to_filename', 'filename_to_url',
-           'filename_to_url2', 'normalize_name',
-           'format_size', 'is_url', 'is_filename',
-           'strip_prefix', 'is_svn_page', 'file_contents',
+           'find_command', 'ask', 'Inf',
+           'normalize_name', 'splitext',
+           'format_size', 'is_installable_dir',
+           'is_svn_page', 'file_contents',
            'split_leading_dir', 'has_leading_dir',
            'make_path_relative', 'normalize_path',
-           'get_file_content', 'renames', 'get_terminal_size']
+           'renames', 'get_terminal_size',
+           'unzip_file', 'untar_file', 'create_download_cache_folder',
+           'cache_download', 'unpack_file']
+
 
 def rmtree(dir):
     shutil.rmtree(dir, ignore_errors=True,
                   onerror=rmtree_errorhandler)
+
 
 def rmtree_errorhandler(func, path, exc_info):
     """On Windows, the files in .svn are read-only, so when rmtree() tries to
@@ -43,6 +45,7 @@ def rmtree_errorhandler(func, path, exc_info):
     # use the original function to repeat the operation
     func(path)
 
+
 def display_path(path):
     """Gives the display value for a given path, making it relative to cwd
     if possible."""
@@ -50,6 +53,7 @@ def display_path(path):
     if path.startswith(os.getcwd() + os.path.sep):
         path = '.' + path[len(os.getcwd()):]
     return path
+
 
 def backup_dir(dir, ext='.bak'):
     """Figure out the name of a directory to back up the given dir to
@@ -60,14 +64,7 @@ def backup_dir(dir, ext='.bak'):
         n += 1
         extension = ext + str(n)
     return dir + extension
-    
-def splitext(path):
-    """Like os.path.splitext, but take off .tar too"""
-    base, ext = posixpath.splitext(path)
-    if base.lower().endswith('.tar'):
-        ext = base[-4:] + ext
-        base = base[:-4]
-    return base, ext
+
 
 def find_command(cmd, paths=None, pathext=None):
     """Searches the PATH for the given command and returns its path"""
@@ -95,6 +92,7 @@ def find_command(cmd, paths=None, pathext=None):
             return cmd_path
     return None
 
+
 def ask(message, options):
     """Ask the message interactively, with the given possible responses"""
     while 1:
@@ -108,64 +106,27 @@ def ask(message, options):
         else:
             return response
 
+
 class _Inf(object):
     """I am bigger than everything!"""
     def __cmp__(self, a):
         if self is a:
             return 0
         return 1
+
     def __repr__(self):
         return 'Inf'
+
 Inf = _Inf()
 del _Inf
 
 
-def url_to_filename(url):
-    """
-    Convert a file: URL to a path.
-    """
-    assert url.startswith('file:'), (
-        "You can only turn file: urls into filenames (not %r)" % url)
-    filename = url[len('file:'):].lstrip('/')
-    filename = urllib.unquote(filename)
-    if _url_drive_re.match(filename):
-        filename = filename[0] + ':' + filename[2:]
-    else:
-        filename = '/' + filename
-    return filename
-
-_drive_re = re.compile('^([a-z]):', re.I)
-_url_drive_re = re.compile('^([a-z])[:|]', re.I)
-
-def filename_to_url(filename):
-    """
-    Convert a path to a file: URL.  The path will be made absolute.
-    """
-    filename = os.path.normcase(os.path.abspath(filename))
-    if _drive_re.match(filename):
-        filename = filename[0] + '|' + filename[2:]
-    url = urllib.quote(filename)
-    url = url.replace(os.path.sep, '/')
-    url = url.lstrip('/')
-    return 'file:///' + url
-
-def filename_to_url2(filename):
-    """
-    Convert a path to a file: URL.  The path will be made absolute and have
-    quoted path parts.
-    """
-    filename = os.path.normcase(os.path.abspath(filename))
-    drive, filename = os.path.splitdrive(filename)
-    filepath = filename.split(os.path.sep)
-    url = '/'.join([urllib.quote(part) for part in filepath])
-    if not drive:
-        url = url.lstrip('/')
-    return 'file:///' + drive + url
-
 _normalize_re = re.compile(r'[^a-z]', re.I)
+
 
 def normalize_name(name):
     return _normalize_re.sub('-', name.lower())
+
 
 def format_size(bytes):
     if bytes > 1000*1000:
@@ -177,27 +138,22 @@ def format_size(bytes):
     else:
         return '%ibytes' % bytes
 
-def is_url(name):
-    """Returns true if the name looks like a URL"""
-    from pip.vcs import vcs
-    if ':' not in name:
-        return False
-    scheme = name.split(':', 1)[0].lower()
-    return scheme in ['http', 'https', 'file', 'ftp'] + vcs.all_schemes
 
-def is_filename(name):
-    if (splitext(name)[1].lower() in ('.zip', '.tar.gz', '.tar.bz2', '.tgz', '.tar', '.pybundle')
-        and os.path.exists(name)):
-        return True
-    if os.path.sep not in name and '/' not in name:
-        # Doesn't have any path components, probably a requirement like 'Foo'
+def is_installable_dir(path):
+    """Return True if `path` is a directory containing a setup.py file."""
+    if not os.path.isdir(path):
         return False
-    return True
+    setup_py = os.path.join(path, 'setup.py')
+    if os.path.isfile(setup_py):
+        return True
+    return False
+
 
 def is_svn_page(html):
     """Returns true if the page appears to be the index page of an svn repository"""
     return (re.search(r'<title>[^<]*Revision \d+:', html)
             and re.search(r'Powered by (?:<a[^>]*?>)?Subversion', html, re.I))
+
 
 def file_contents(filename):
     fp = open(filename, 'rb')
@@ -205,6 +161,7 @@ def file_contents(filename):
         return fp.read()
     finally:
         fp.close()
+
 
 def split_leading_dir(path):
     path = str(path)
@@ -216,6 +173,7 @@ def split_leading_dir(path):
         return path.split('\\', 1)
     else:
         return path, ''
+
 
 def has_leading_dir(paths):
     """Returns true if all the paths have the same leading path name
@@ -230,6 +188,7 @@ def has_leading_dir(paths):
         elif prefix != common_prefix:
             return False
     return True
+
 
 def make_path_relative(path, rel_to):
     """
@@ -259,45 +218,23 @@ def make_path_relative(path, rel_to):
         return '.' + os.path.sep
     return os.path.sep.join(full_parts)
 
+
 def normalize_path(path):
     """
     Convert a path to its canonical, case-normalized, absolute version.
-    
+
     """
     return os.path.normcase(os.path.realpath(path))
 
-_scheme_re = re.compile(r'^(http|https|file):', re.I)
-_url_slash_drive_re = re.compile(r'/*([a-z])\|', re.I)
 
-def get_file_content(url, comes_from=None):
-    """Gets the content of a file; it may be a filename, file: URL, or
-    http: URL.  Returns (location, content)"""
-    match = _scheme_re.search(url)
-    if match:
-        scheme = match.group(1).lower()
-        if (scheme == 'file' and comes_from
-            and comes_from.startswith('http')):
-            raise InstallationError(
-                'Requirements file %s references URL %s, which is local'
-                % (comes_from, url))
-        if scheme == 'file':
-            path = url.split(':', 1)[1]
-            path = path.replace('\\', '/')
-            match = _url_slash_drive_re.match(path)
-            if match:
-                path = match.group(1) + ':' + path.split('|', 1)[1]
-            path = urllib.unquote(path)
-            if path.startswith('/'):
-                path = '/' + path.lstrip('/')
-            url = path
-        else:
-            ## FIXME: catch some errors
-            resp = urllib2.urlopen(url)
-            return resp.geturl(), resp.read()
-    f = open(url)
-    content = f.read()
-    f.close()
-    return url, content
+def splitext(path):
+    """Like os.path.splitext, but take off .tar too"""
+    base, ext = posixpath.splitext(path)
+    if base.lower().endswith('.tar'):
+        ext = base[-4:] + ext
+        base = base[:-4]
+    return base, ext
+
 
 def renames(old, new):
     """Like os.renames(), but handles renaming across devices."""
@@ -315,13 +252,7 @@ def renames(old, new):
         except OSError:
             pass
 
-def in_venv():
-    """
-    Return True if we're running inside a virtualenv, False otherwise.
 
-    """
-    return hasattr(sys, 'real_prefix')
-        
 def is_local(path):
     """
     Return True if path is within sys.prefix, if we're running in a virtualenv.
@@ -329,9 +260,10 @@ def is_local(path):
     If we're not in a virtualenv, all paths are considered "local."
 
     """
-    if not in_venv():
+    if not running_under_virtualenv():
         return True
     return normalize_path(path).startswith(normalize_path(sys.prefix))
+
 
 def dist_is_local(dist):
     """
@@ -339,9 +271,10 @@ def dist_is_local(dist):
     (i.e. within current virtualenv).
 
     Always True if we're not in a virtualenv.
-    
+
     """
     return is_local(dist_location(dist))
+
 
 def get_installed_distributions(local_only=True, skip=('setuptools', 'pip', 'python')):
     """
@@ -361,6 +294,7 @@ def get_installed_distributions(local_only=True, skip=('setuptools', 'pip', 'pyt
         local_test = lambda d: True
     return [d for d in pkg_resources.working_set if local_test(d) and d.key not in skip]
 
+
 def egg_link_path(dist):
     """
     Return the path where we'd expect to find a .egg-link file for
@@ -369,10 +303,11 @@ def egg_link_path(dist):
     .egg-link and easy-install.pth files).
 
     This won't find a globally-installed develop egg if we're in a
-    virtualenv. 
+    virtualenv.
 
     """
     return os.path.join(site_packages, dist.project_name) + '.egg-link'
+
 
 def dist_location(dist):
     """
@@ -387,15 +322,22 @@ def dist_location(dist):
         return egg_link
     return dist.location
 
+
 def get_terminal_size():
     """Returns a tuple (x, y) representing the width(x) and the height(x)
     in characters of the terminal window."""
     def ioctl_GWINSZ(fd):
         try:
-            import fcntl, termios, struct
+            import fcntl
+            import termios
+            import struct
             cr = struct.unpack('hh', fcntl.ioctl(fd, termios.TIOCGWINSZ,
         '1234'))
         except:
+            return None
+        if cr == (0, 0):
+            return None
+        if cr == (0, 0):
             return None
         return cr
     cr = ioctl_GWINSZ(0) or ioctl_GWINSZ(1) or ioctl_GWINSZ(2)
@@ -407,8 +349,131 @@ def get_terminal_size():
         except:
             pass
     if not cr:
-        try:
-            cr = (env['LINES'], env['COLUMNS'])
-        except:
-            cr = (25, 80)
+        cr = (os.environ.get('LINES', 25), os.environ.get('COLUMNS', 80))
     return int(cr[1]), int(cr[0])
+
+
+def unzip_file(filename, location, flatten=True):
+    """Unzip the file (zip file located at filename) to the destination
+    location"""
+    if not os.path.exists(location):
+        os.makedirs(location)
+    zipfp = open(filename, 'rb')
+    try:
+        zip = zipfile.ZipFile(zipfp)
+        leading = has_leading_dir(zip.namelist()) and flatten
+        for name in zip.namelist():
+            data = zip.read(name)
+            fn = name
+            if leading:
+                fn = split_leading_dir(name)[1]
+            fn = os.path.join(location, fn)
+            dir = os.path.dirname(fn)
+            if not os.path.exists(dir):
+                os.makedirs(dir)
+            if fn.endswith('/') or fn.endswith('\\'):
+                # A directory
+                if not os.path.exists(fn):
+                    os.makedirs(fn)
+            else:
+                fp = open(fn, 'wb')
+                try:
+                    fp.write(data)
+                finally:
+                    fp.close()
+    finally:
+        zipfp.close()
+
+
+def untar_file(filename, location):
+    """Untar the file (tar file located at filename) to the destination location"""
+    if not os.path.exists(location):
+        os.makedirs(location)
+    if filename.lower().endswith('.gz') or filename.lower().endswith('.tgz'):
+        mode = 'r:gz'
+    elif filename.lower().endswith('.bz2') or filename.lower().endswith('.tbz'):
+        mode = 'r:bz2'
+    elif filename.lower().endswith('.tar'):
+        mode = 'r'
+    else:
+        logger.warn('Cannot determine compression type for file %s' % filename)
+        mode = 'r:*'
+    tar = tarfile.open(filename, mode)
+    try:
+        # note: python<=2.5 doesnt seem to know about pax headers, filter them
+        leading = has_leading_dir([
+            member.name for member in tar.getmembers()
+            if member.name != 'pax_global_header'
+        ])
+        for member in tar.getmembers():
+            fn = member.name
+            if fn == 'pax_global_header':
+                continue
+            if leading:
+                fn = split_leading_dir(fn)[1]
+            path = os.path.join(location, fn)
+            if member.isdir():
+                if not os.path.exists(path):
+                    os.makedirs(path)
+            else:
+                try:
+                    fp = tar.extractfile(member)
+                except (KeyError, AttributeError), e:
+                    # Some corrupt tar files seem to produce this
+                    # (specifically bad symlinks)
+                    logger.warn(
+                        'In the tar file %s the member %s is invalid: %s'
+                        % (filename, member.name, e))
+                    continue
+                if not os.path.exists(os.path.dirname(path)):
+                    os.makedirs(os.path.dirname(path))
+                destfp = open(path, 'wb')
+                try:
+                    shutil.copyfileobj(fp, destfp)
+                finally:
+                    destfp.close()
+                fp.close()
+    finally:
+        tar.close()
+
+
+def create_download_cache_folder(folder):
+    logger.indent -= 2
+    logger.notify('Creating supposed download cache at %s' % folder)
+    logger.indent += 2
+    os.makedirs(folder)
+
+
+def cache_download(target_file, temp_location, content_type):
+    logger.notify('Storing download in cache at %s' % display_path(target_file))
+    shutil.copyfile(temp_location, target_file)
+    fp = open(target_file+'.content-type', 'w')
+    fp.write(content_type)
+    fp.close()
+    os.unlink(temp_location)
+
+
+def unpack_file(filename, location, content_type, link):
+    if (content_type == 'application/zip'
+        or filename.endswith('.zip')
+        or filename.endswith('.pybundle')
+        or zipfile.is_zipfile(filename)):
+        unzip_file(filename, location, flatten=not filename.endswith('.pybundle'))
+    elif (content_type == 'application/x-gzip'
+          or tarfile.is_tarfile(filename)
+          or splitext(filename)[1].lower() in ('.tar', '.tar.gz', '.tar.bz2', '.tgz', '.tbz')):
+        untar_file(filename, location)
+    elif (content_type and content_type.startswith('text/html')
+          and is_svn_page(file_contents(filename))):
+        # We don't really care about this
+        from pip.vcs.subversion import Subversion
+        Subversion('svn+' + link.url).unpack(location)
+    else:
+        ## FIXME: handle?
+        ## FIXME: magic signatures?
+        logger.fatal('Cannot unpack file %s (downloaded from %s, content-type: %s); cannot detect archive format'
+                     % (filename, location, content_type))
+        raise InstallationError('Cannot determine archive format of %s' % location)
+
+
+

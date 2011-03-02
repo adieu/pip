@@ -1,27 +1,34 @@
 """Base Command class, and related routines"""
 
-import sys
+from cStringIO import StringIO
 import os
 import socket
-import urllib2
-import urllib
-from cStringIO import StringIO
+import sys
 import traceback
 import time
+
+from pip import commands
 from pip.log import logger
 from pip.baseparser import parser, ConfigOptionParser, UpdatingDefaultsHelpFormatter
-from pip.exceptions import InstallationError, UninstallationError
+from pip.download import urlopen
+from pip.exceptions import BadCommand, InstallationError, UninstallationError
 from pip.venv import restart_in_venv
+from pip.backwardcompat import walk_packages
 
 __all__ = ['command_dict', 'Command', 'load_all_commands',
            'load_command', 'command_names']
 
 command_dict = {}
 
+# for backwards compatibiliy
+get_proxy = urlopen.get_proxy
+
+
 class Command(object):
     name = None
     usage = None
     hidden = False
+
     def __init__(self):
         assert self.name
         self.parser = ConfigOptionParser(
@@ -41,14 +48,15 @@ class Command(object):
         # Make sure we have all global options carried over
         for attr in ['log', 'venv', 'proxy', 'venv_base', 'require_venv',
                      'respect_venv', 'log_explicit_levels', 'log_file',
-                     'timeout', 'default_vcs', 'skip_requirements_regex']:
+                     'timeout', 'default_vcs', 'skip_requirements_regex',
+                     'no_input']:
             setattr(options, attr, getattr(initial_options, attr) or getattr(options, attr))
         options.quiet += initial_options.quiet
         options.verbose += initial_options.verbose
 
     def setup_logging(self):
         pass
-        
+
     def main(self, complete_args, args, initial_options):
         options, args = self.parser.parse_args(args)
         self.merge_options(initial_options, options)
@@ -65,7 +73,7 @@ class Command(object):
             logger.explicit_levels = True
 
         self.setup_logging()
-            
+
         if options.require_venv and not options.venv:
             # If a venv is required check if it can really be found
             if not os.environ.get('VIRTUAL_ENV'):
@@ -76,7 +84,6 @@ class Command(object):
 
         if args and args[-1] == '___VENV_RESTART___':
             ## FIXME: We don't do anything this this value yet:
-            venv_location = args[-2]
             args = args[:-2]
             options.venv = None
         else:
@@ -113,12 +120,16 @@ class Command(object):
 
         socket.setdefaulttimeout(options.timeout or None)
 
-        setup_proxy_handler(options.proxy)
+        urlopen.setup(proxystr=options.proxy, prompting=not options.no_input)
 
         exit = 0
         try:
             self.run(options, args)
         except (InstallationError, UninstallationError), e:
+            logger.fatal(str(e))
+            logger.info('Exception information:\n%s' % format_exc())
+            exit = 1
+        except BadCommand, e:
             logger.fatal(str(e))
             logger.info('Exception information:\n%s' % format_exc())
             exit = 1
@@ -137,38 +148,8 @@ class Command(object):
             log_fp.close()
         return exit
 
-## FIXME: should get moved somewhere else:
-def setup_proxy_handler(proxystr=''):
-    """Set the proxy handler given the option passed on the command
-    line.  If an empty string is passed it looks at the HTTP_PROXY
-    environment variable.  """
-    proxy = get_proxy(proxystr)
-    if proxy:
-        proxy_support = urllib2.ProxyHandler({"http": proxy, "ftp": proxy})
-        opener = urllib2.build_opener(proxy_support, urllib2.CacheFTPHandler)
-        urllib2.install_opener(opener)
 
-def get_proxy(proxystr=''):
-    """Get the proxy given the option passed on the command line.  If an
-    empty string is passed it looks at the HTTP_PROXY environment
-    variable."""
-    if not proxystr:
-        proxystr = os.environ.get('HTTP_PROXY', '')
-    if proxystr:
-        if '@' in proxystr:
-            user_password, server_port = proxystr.split('@', 1)
-            if ':' in user_password:
-                user, password = user_password.split(':', 1)
-            else:
-                user = user_password
-                import getpass
-                prompt = 'Password for %s@%s: ' % (user, server_port)
-                password = urllib.quote(getpass.getpass(prompt))
-            return '%s:%s@%s' % (user, password, server_port)
-        else:
-            return proxystr
-    else:
-        return None
+
 
 def format_exc(exc_info=None):
     if exc_info is None:
@@ -177,6 +158,7 @@ def format_exc(exc_info=None):
     traceback.print_exception(*exc_info, **dict(file=out))
     return out.getvalue()
 
+
 def open_logfile(filename, mode='a'):
     """Open the named log file in append mode.
 
@@ -184,12 +166,18 @@ def open_logfile(filename, mode='a'):
     the file to separate past activity from current activity.
     """
     filename = os.path.expanduser(filename)
+    filename = os.path.abspath(filename)
+    dirname = os.path.dirname(filename)
+    if not os.path.exists(dirname):
+        os.makedirs(dirname)
     exists = os.path.exists(filename)
+
     log_fp = open(filename, mode)
     if exists:
         print >> log_fp, '-'*60
         print >> log_fp, '%s run on %s' % (sys.argv[0], time.strftime('%c'))
     return log_fp
+
 
 def load_command(name):
     full_name = 'pip.commands.%s' % name
@@ -200,14 +188,13 @@ def load_command(name):
     except ImportError:
         pass
 
+
 def load_all_commands():
     for name in command_names():
         load_command(name)
 
+
 def command_names():
-    dir = os.path.join(os.path.dirname(__file__), 'commands')
-    names = []
-    for name in os.listdir(dir):
-        if name.endswith('.py') and os.path.isfile(os.path.join(dir, name)):
-            names.append(os.path.splitext(name)[0])
-    return names
+    names = set((pkg[1] for pkg in walk_packages(path=commands.__path__)))
+    return list(names)
+

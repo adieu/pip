@@ -1,3 +1,4 @@
+import sys
 from pip.basecommand import Command
 
 BASE_COMPLETION = """
@@ -18,13 +19,13 @@ function _pip_completion {
   local words cword
   read -Ac words
   read -cn cword
-  reply=( $( COMP_WORDS="$words[*]" \\ 
+  reply=( $( COMP_WORDS="$words[*]" \\
              COMP_CWORD=$(( cword-1 )) \\
              PIP_AUTO_COMPLETE=1 $words[1] ) )
 }
 compctl -K _pip_completion pip
-"""
-}
+"""}
+
 
 class CompletionCommand(Command):
     name = 'completion'
@@ -48,10 +49,12 @@ class CompletionCommand(Command):
 
     def run(self, options, args):
         """Prints the completion code of the given shell"""
-        if options.shell in ('bash', 'zsh'):
+        shells = COMPLETION_SCRIPTS.keys()
+        shell_options = ['--'+shell for shell in sorted(shells)]
+        if options.shell in shells:
             script = COMPLETION_SCRIPTS.get(options.shell, '')
             print BASE_COMPLETION % {'script': script, 'shell': options.shell}
         else:
-            print 'ERROR: You must pass --bash or --zsh'
+            sys.stderr.write('ERROR: You must pass %s\n' % ' or '.join(shell_options))
 
 CompletionCommand()

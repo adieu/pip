@@ -1,13 +1,13 @@
-
+import os
 import tempfile
 import textwrap
-from test_pip import here, reset_env, run_pip, clear_environ, write_file
-import os
+from test_pip import reset_env, run_pip, clear_environ, write_file
+
 
 def test_options_from_env_vars():
     """
     Test if ConfigOptionParser reads env vars (e.g. not using PyPI here)
-    
+
     """
     environ = clear_environ(os.environ.copy())
     environ['PIP_NO_INDEX'] = '1'
@@ -16,10 +16,11 @@ def test_options_from_env_vars():
     assert "Ignoring indexes:" in result.stdout, str(result)
     assert "DistributionNotFound: No distributions at all found for INITools" in result.stdout
 
+
 def test_command_line_options_override_env_vars():
     """
     Test that command line options override environmental variables.
-    
+
     """
     environ = clear_environ(os.environ.copy())
     environ['PIP_INDEX_URL'] = 'http://pypi.appspot.com/'
@@ -31,10 +32,11 @@ def test_command_line_options_override_env_vars():
     assert "http://pypi.appspot.com/INITools" not in result.stdout
     assert "Getting page http://download.zope.org/ppix" in result.stdout
 
+
 def test_command_line_append_flags():
     """
     Test command line flags that append to defaults set by environmental variables.
-    
+
     """
     environ = clear_environ(os.environ.copy())
     environ['PIP_FIND_LINKS'] = 'http://pypi.pinaxproject.com'
@@ -46,13 +48,35 @@ def test_command_line_append_flags():
     assert "Analyzing links from page http://pypi.pinaxproject.com" in result.stdout
     assert "Analyzing links from page http://example.com" in result.stdout
 
+
+def test_command_line_appends_correctly():
+    """
+    Test multiple appending options set by environmental variables.
+
+    """
+    environ = clear_environ(os.environ.copy())
+    environ['PIP_FIND_LINKS'] = 'http://pypi.pinaxproject.com http://example.com'
+    reset_env(environ)
+    result = run_pip('install', '-vvv', 'INITools', expect_error=True)
+    print result.stdout
+    assert "Analyzing links from page http://pypi.pinaxproject.com" in result.stdout
+    assert "Analyzing links from page http://example.com" in result.stdout
+
+
 def test_config_file_override_stack():
     """
     Test config files (global, overriding a global config with a
     local, overriding all with a command line flag).
-    
+
     """
-    f, config_file = tempfile.mkstemp('-pip.cfg', 'test-')
+    try:
+        _, config_file = tempfile.mkstemp('-pip.cfg', 'test-')
+        _test_config_file_override_stack(config_file)
+    finally:
+        os.remove(config_file)
+
+
+def _test_config_file_override_stack(config_file):
     environ = clear_environ(os.environ.copy())
     environ['PIP_CONFIG_FILE'] = config_file # set this to make pip load it
     reset_env(environ)
@@ -76,3 +100,15 @@ def test_config_file_override_stack():
     assert "Getting page http://pypi.appspot.com/INITools" not in result.stdout
     assert "Getting page http://pypi.python.org/simple/INITools" in result.stdout
 
+
+def test_log_file_no_directory():
+    """
+    Test opening a log file with no directory name.
+
+    """
+    from pip.basecommand import open_logfile
+    fp = open_logfile('testpip.log')
+    fp.write('can write')
+    fp.close()
+    assert os.path.exists(fp.name)
+    os.remove(fp.name)

@@ -1,11 +1,12 @@
 import os
-import shutil
 import tempfile
 import re
 from pip import call_subprocess
 from pip.log import logger
 from pip.util import rmtree, display_path
 from pip.vcs import vcs, VersionControl
+from pip.download import path_to_url2
+
 
 class Bazaar(VersionControl):
     name = 'bzr'
@@ -29,20 +30,6 @@ class Bazaar(VersionControl):
                 return url, rev
         return None, None
 
-    def unpack(self, location):
-        """Get the bzr branch at the url to the destination location"""
-        url, rev = self.get_url_rev()
-        logger.notify('Checking out bzr repository %s to %s' % (url, location))
-        logger.indent += 2
-        try:
-            if os.path.exists(location):
-                os.rmdir(location)
-            call_subprocess(
-                [self.cmd, 'branch', url, location],
-                filter_stdout=self._filter, show_stdout=False)
-        finally:
-            logger.indent -= 2
-
     def export(self, location):
         """Export the Bazaar repository at the url to the destination location"""
         temp_dir = tempfile.mkdtemp('-export', 'pip-')
@@ -54,7 +41,7 @@ class Bazaar(VersionControl):
             call_subprocess([self.cmd, 'export', location], cwd=temp_dir,
                             filter_stdout=self._filter, show_stdout=False)
         finally:
-            shutil.rmtree(temp_dir)
+            rmtree(temp_dir)
 
     def switch(self, dest, url, rev_options):
         call_subprocess([self.cmd, 'switch', url], cwd=dest)
@@ -92,7 +79,10 @@ class Bazaar(VersionControl):
             for x in ('checkout of branch: ',
                       'parent branch: '):
                 if line.startswith(x):
-                    return line.split(x)[1]
+                    repo = line.split(x)[1]
+                    if self._is_local_repository(repo):
+                        return path_to_url2(repo)
+                    return repo
         return None
 
     def get_revision(self, location):
@@ -124,10 +114,10 @@ class Bazaar(VersionControl):
 
         if current_rev in tag_revs:
             # It's a tag
-            tag = tag_revs.get(current_rev, current_rev)
             full_egg_name = '%s-%s' % (egg_project_name, tag_revs[current_rev])
         else:
             full_egg_name = '%s-dev_r%s' % (dist.egg_name(), current_rev)
         return '%s@%s#egg=%s' % (repo, current_rev, full_egg_name)
+
 
 vcs.register(Bazaar)

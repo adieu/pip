@@ -4,7 +4,16 @@ import sys
 import os
 from distutils import sysconfig
 
-if getattr(sys, 'real_prefix', None):
+
+def running_under_virtualenv():
+    """
+    Return True if we're running inside a virtualenv, False otherwise.
+
+    """
+    return hasattr(sys, 'real_prefix')
+
+
+if running_under_virtualenv():
     ## FIXME: is build/ a good name?
     build_prefix = os.path.join(sys.prefix, 'build')
     src_prefix = os.path.join(sys.prefix, 'src')
@@ -12,6 +21,11 @@ else:
     ## FIXME: this isn't a very good default
     build_prefix = os.path.join(os.getcwd(), 'build')
     src_prefix = os.path.join(os.getcwd(), 'src')
+
+# under Mac OS X + virtualenv sys.prefix is not properly resolved
+# it is something like /path/to/python/bin/..
+build_prefix = os.path.abspath(build_prefix)
+src_prefix = os.path.abspath(src_prefix)
 
 # FIXME doesn't account for venv linked to global site-packages
 

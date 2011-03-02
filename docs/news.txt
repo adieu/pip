@@ -1,8 +1,104 @@
 News for pip
 ============
 
-hg tip
-------
+tip
+---
+
+* Fixed issue #14 - No uninstall-on-upgrade with URL package. Thanks Oliver Tonnhofer
+
+* Fixed issue #163 - Egg name not properly resolved. Thanks Igor Sobreira
+
+* Fixed issue #178 - Non-alphabetical installation of requirements. Thanks Igor Sobreira
+
+* Fixed issue #199 - Documentation mentions --index instead of --index-url. Thanks Kelsey Hightower
+
+* Fixed issue #204 - rmtree undefined in mercurial.py. Thanks Kelsey Hightower
+
+
+
+0.8.2
+-----
+
+* Avoid redundant unpacking of bundles (from pwaller)
+
+* Fixed issue #32, #150, #161 - Fixed checking out the correct
+  tag/branch/commit when updating an editable Git requirement.
+
+* Fixed issue #49 - Added ability to install version control requirements
+  without making them editable, e.g.::
+
+    pip install hg+http://bitbucket.org/ianb/pip/
+
+* Fixed issue #175 - Correctly locate build and source directory on Mac OS X.
+
+* Added ``git+https://`` scheme to Git VCS backend.
+
+0.8.1
+-----
+
+* Added global --user flag as shortcut for --install-option="--user". From
+  Ronny Pfannschmidt.
+
+* Added support for `PyPI mirrors <http://pypi.python.org/mirrors>`_ as
+  defined in `PEP 381 <http://www.python.org/dev/peps/pep-0381/>`_, from
+  Jannis Leidel.
+
+* Fixed issue #138 - Git revisions ignored. Thanks John-Scott Atlakson.
+
+* Fixed issue #95 - Initial editable install of github package from a tag fails. Thanks John-Scott Atlakson.
+
+* Fixed issue #107 - Can't install if a directory in cwd has the same name as the package you're installing.
+
+* Fixed issue #39 - --install-option="--prefix=~/.local" ignored with -e.
+Thanks Ronny Pfannschmidt and Wil Tan.
+
+
+
+0.8
+---
+
+* Track which ``build/`` directories pip creates, never remove directories
+  it doesn't create.  From Hugo Lopes Tavares.
+
+* Pip now accepts file:// index URLs. Thanks Dave Abrahams.
+
+* Various cleanup to make test-running more consistent and less fragile.
+  Thanks Dave Abrahams.
+
+* Real Windows support (with passing tests). Thanks Dave Abrahams.
+
+* ``pip-2.7`` etc. scripts are created (Python-version specific scripts)
+
+* ``contrib/build-standalone`` script creates a runnable ``.zip`` form of
+  pip, from Jannis Leidel
+
+* Editable git repos are updated when reinstalled
+
+* Fix problem with ``--editable`` when multiple ``.egg-info/`` directories
+  are found.
+
+* A number of VCS-related fixes for ``pip freeze``, from Hugo Lopes Tavares.
+
+* Significant test framework changes, from Hugo Lopes Tavares.
+
+0.7.2
+-----
+
+* Set zip_safe=False to avoid problems some people are encountering where
+  pip is installed as a zip file.
+
+0.7.1
+-----
+
+* Fixed opening of logfile with no directory name. Thanks Alexandre Conrad.
+
+* Temporary files are consistently cleaned up, especially after
+  installing bundles, also from Alex Conrad.
+
+* Tests now require at least ScriptTest 1.0.3.
+
+0.7
+---
 
 * Fixed uninstallation on Windows
 * Added ``pip search`` command.
@@ -30,6 +126,18 @@ hg tip
   ``pip install path/to/dir/``).
 * Fixed installing editable packages with ``svn+ssh`` URLs.
 * Don't print unwanted debug information when running the freeze command.
+* Create log file directory automatically. Thanks Alexandre Conrad.
+* Make test suite easier to run successfully. Thanks Dave Abrahams.
+* Fixed "pip install ." and "pip install .."; better error for directory
+  without setup.py. Thanks Alexandre Conrad.
+* Support Debian/Ubuntu "dist-packages" in zip command. Thanks duckx.
+* Fix relative --src folder. Thanks Simon Cross.
+* Handle missing VCS with an error message. Thanks Alexandre Conrad.
+* Added --no-download option to install; pairs with --no-install to separate
+  download and installation into two steps. Thanks Simon Cross.
+* Fix uninstalling from requirements file containing -f, -i, or
+  --extra-index-url.
+* Leftover build directories are now removed. Thanks Alexandre Conrad.
 
 0.6.3
 -----

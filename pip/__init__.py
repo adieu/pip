@@ -1,15 +1,19 @@
 #!/usr/bin/env python
-import sys
 import os
 import optparse
+
 import subprocess
+import sys
 import re
-from pip.log import logger
+import difflib
+
+from pip.basecommand import command_dict, load_command, load_all_commands, command_names
 from pip.baseparser import parser
 from pip.exceptions import InstallationError
-from pip.basecommand import command_dict, load_command, load_all_commands
-from pip.vcs import vcs, get_src_requirement, import_vcs_support
+from pip.log import logger
 from pip.util import get_installed_distributions
+from pip.backwardcompat import walk_packages
+
 
 def autocomplete():
     """Command and option completion for the main option parser (and options)
@@ -18,7 +22,7 @@ def autocomplete():
     Enable by sourcing one of the completion shell scripts (bash or zsh).
     """
     # Don't complete if user hasn't sourced bash_completion file.
-    if not os.environ.has_key('PIP_AUTO_COMPLETE'):
+    if 'PIP_AUTO_COMPLETE' not in os.environ:
         return
     cwords = os.environ['COMP_WORDS'].split()[1:]
     cword = int(os.environ['COMP_CWORD'])
@@ -75,21 +79,39 @@ def autocomplete():
         print ' '.join(filter(lambda x: x.startswith(current), subcommands))
     sys.exit(1)
 
+
+def version_control():
+    # Import all the version control support modules:
+    from pip import vcs
+    for importer, modname, ispkg in \
+            walk_packages(path=vcs.__path__, prefix=vcs.__name__+'.'):
+        __import__(modname)
+
+
 def main(initial_args=None):
     if initial_args is None:
         initial_args = sys.argv[1:]
     autocomplete()
+    version_control()
     options, args = parser.parse_args(initial_args)
     if options.help and not args:
         args = ['help']
     if not args:
-        parser.error('You must give a command (use "pip help" see a list of commands)')
+        parser.error('You must give a command (use "pip help" to see a list of commands)')
     command = args[0].lower()
     load_command(command)
-    ## FIXME: search for a command match?
     if command not in command_dict:
-        parser.error('No command by the name %(script)s %(arg)s\n  (maybe you meant "%(script)s install %(arg)s")'
-                     % dict(script=os.path.basename(sys.argv[0]), arg=command))
+        close_commands = difflib.get_close_matches(command, command_names())
+        if close_commands:
+            guess = close_commands[0]
+            if args[1:]:
+                guess = "%s %s" % (guess, " ".join(args[1:]))
+        else:
+            guess = 'install %s' % command
+        error_dict = {'arg': command, 'guess': guess,
+                      'script': os.path.basename(sys.argv[0])}
+        parser.error('No command by the name %(script)s %(arg)s\n  '
+                     '(maybe you meant "%(script)s %(guess)s")' % error_dict)
     command = command_dict[command]
     return command.main(initial_args, args[1:], options)
 
@@ -113,6 +135,7 @@ class FrozenRequirement(object):
     def from_dist(cls, dist, dependency_links, find_tags=False):
         location = os.path.normcase(os.path.abspath(dist.location))
         comments = []
+        from pip.vcs import vcs, get_src_requirement
         if vcs.get_backend_name(location):
             editable = True
             req = get_src_requirement(dist, location, find_tags)
@@ -145,7 +168,7 @@ class FrozenRequirement(object):
                     else:
                         rev = '{%s}' % date_match.group(1)
                     editable = True
-                    req = 'svn+%s@%s#egg=%s' % (svn_location, rev, cls.egg_name(dist))
+                    req = '%s@%s#egg=%s' % (svn_location, rev, cls.egg_name(dist))
         return cls(dist.project_name, req, editable, comments)
 
     @staticmethod
@@ -231,7 +254,6 @@ def call_subprocess(cmd, show_stdout=True,
     if stdout is not None:
         return ''.join(all_output)
 
-import_vcs_support()
 
 if __name__ == '__main__':
     exit = main()
